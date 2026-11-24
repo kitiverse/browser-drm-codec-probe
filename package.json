@@ -1,6 +1,6 @@
 {
   "name": "browser-drm-codec-probe",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Zero-dependency browser probe for EME DRM tiers (Widevine L1/L2/L3, PlayReady SL3000/SL2000, FairPlay, ClearKey), verified encryption schemes, HDCP 2.2 policy, and MSE MediaCapabilities hardware decoding.",
   "type": "module",
   "main": "./src/index.js",

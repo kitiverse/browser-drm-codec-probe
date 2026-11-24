@@ -16,6 +16,7 @@ function createMockNavigator({
   widevineRobustness = [],
   widevineByCodec = null,
   widevineSchemes = ['cenc', 'cbcs'],
+  widevineSchemesByCodec = null,
   playreadyKeySystems = null,
   playreadyRobustness = [],
   playreadySchemes = ['cenc', 'cbcs'],
@@ -30,99 +31,140 @@ function createMockNavigator({
   audioSupport = {},
   coupledSupport = null,
   coupledReturnsAccess = true,
+  enforceMp4ForCenc = true,
   logCalls = null,
 } = {}) {
   return {
     isSecureContext,
     async requestMediaKeySystemAccess(keySystem, configs) {
-      const config = configs?.[0] || {};
-      const cap = config.videoCapabilities?.[0] || {};
-      const robustness = cap.robustness;
-      const scheme = cap.encryptionScheme;
-      const ct = cap.contentType || '';
-      const initDataTypes = config.initDataTypes || [];
-
       if (logCalls) {
-        logCalls.eme.push({ keySystem, config });
+        logCalls.eme.push({ keySystem, config: configs?.[0], configs });
       }
 
-      const buildAccess = (acceptedSchemeList) => {
-        if (scheme !== undefined && !ignoreEncryptionSchemeInWebIdl) {
-          if (!acceptedSchemeList.includes(scheme)) {
-            throw new Error(`Unsupported encryptionScheme: ${scheme}`);
+      const trySingleConfig = (config = {}) => {
+        const initDataTypes = config.initDataTypes || [];
+        const videoCaps = Array.isArray(config.videoCapabilities) && config.videoCapabilities.length
+          ? config.videoCapabilities
+          : [{}];
+
+        for (const cap of videoCaps) {
+          const robustness = cap.robustness;
+          const scheme = cap.encryptionScheme;
+          const ct = cap.contentType || '';
+
+          if (enforceMp4ForCenc && /^video\/webm\b/i.test(ct) && (initDataTypes.includes('cenc') || scheme === 'cbcs' || scheme === 'cenc')) {
+            continue;
           }
-        }
-        return {
-          keySystem,
-          getConfiguration() {
-            const retCap = { contentType: ct };
-            if (robustness !== undefined) retCap.robustness = robustness;
+
+          const buildAccess = (acceptedSchemeList) => {
             if (scheme !== undefined && !ignoreEncryptionSchemeInWebIdl) {
-              retCap.encryptionScheme = scheme;
+              if (!acceptedSchemeList.includes(scheme)) {
+                return null;
+              }
             }
             return {
-              initDataTypes,
-              videoCapabilities: [retCap],
-            };
-          },
-          async createMediaKeys() {
-            if (hdcpUnsupported) {
-              return {};
-            }
-            return {
-              async getStatusForPolicy({ minHdcpVersion }) {
-                if (typeof hdcpStatus === 'function') {
-                  return hdcpStatus({ minHdcpVersion, keySystem });
+              keySystem,
+              getConfiguration() {
+                const retCap = { contentType: ct };
+                if (robustness !== undefined) retCap.robustness = robustness;
+                if (scheme !== undefined && !ignoreEncryptionSchemeInWebIdl) {
+                  retCap.encryptionScheme = scheme;
                 }
-                return hdcpStatus;
+                return {
+                  initDataTypes,
+                  videoCapabilities: [retCap],
+                };
+              },
+              async createMediaKeys() {
+                const unsupportedForKs =
+                  typeof hdcpUnsupported === 'function' ? hdcpUnsupported({ keySystem, robustness }) : hdcpUnsupported;
+                if (unsupportedForKs) {
+                  return {};
+                }
+                return {
+                  async getStatusForPolicy({ minHdcpVersion }) {
+                    if (typeof hdcpStatus === 'function') {
+                      return hdcpStatus({ minHdcpVersion, keySystem, robustness });
+                    }
+                    return hdcpStatus;
+                  },
+                };
               },
             };
-          },
-        };
+          };
+
+          if (keySystem === 'com.widevine.alpha') {
+            let allowed = widevineRobustness;
+            if (widevineByCodec) {
+              const matchedEntry = Object.entries(widevineByCodec).find(([pattern]) => ct.includes(pattern));
+              allowed = matchedEntry ? matchedEntry[1] : [];
+            }
+            if (allowed.includes(robustness)) {
+              let schemesForCodec = widevineSchemes;
+              if (widevineSchemesByCodec) {
+                const matchedSchemeEntry = Object.entries(widevineSchemesByCodec).find(([pattern]) => ct.includes(pattern));
+                if (matchedSchemeEntry) schemesForCodec = matchedSchemeEntry[1];
+              }
+              const access = buildAccess(schemesForCodec);
+              if (access) return access;
+            }
+            continue;
+          }
+
+          if (keySystem.startsWith('com.microsoft.playready')) {
+            if (playreadyKeySystems) {
+              const allowedRobustness = playreadyKeySystems[keySystem];
+              if (Array.isArray(allowedRobustness) && allowedRobustness.includes(robustness)) {
+                const access = buildAccess(playreadySchemes);
+                if (access) return access;
+              }
+              continue;
+            }
+            if (keySystem === 'com.microsoft.playready' && playreadyRobustness.includes(robustness)) {
+              const access = buildAccess(playreadySchemes);
+              if (access) return access;
+            }
+            continue;
+          }
+
+          if (keySystem === 'com.apple.fps' && fairplay) {
+            assert.deepEqual(initDataTypes, ['sinf', 'skd']);
+            assert.ok(!initDataTypes.includes('cenc'));
+            const access = buildAccess(fairplaySchemes);
+            if (access) return access;
+            continue;
+          }
+
+          if (keySystem === 'org.w3.clearkey' && clearkey) {
+            const access = buildAccess(clearkeySchemes);
+            if (access) return access;
+            continue;
+          }
+        }
+        return null;
       };
 
-      if (keySystem === 'com.widevine.alpha') {
-        let allowed = widevineRobustness;
-        if (widevineByCodec) {
-          const matchedEntry = Object.entries(widevineByCodec).find(([pattern]) => ct.includes(pattern));
-          allowed = matchedEntry ? matchedEntry[1] : [];
-        }
-        if (allowed.includes(robustness)) {
-          return buildAccess(widevineSchemes);
-        }
-        throw new Error('Unsupported Widevine robustness');
+      for (const config of configs || [{}]) {
+        const access = trySingleConfig(config);
+        if (access) return access;
       }
 
-      if (keySystem.startsWith('com.microsoft.playready')) {
-        if (playreadyKeySystems) {
-          const allowedRobustness = playreadyKeySystems[keySystem];
-          if (Array.isArray(allowedRobustness) && allowedRobustness.includes(robustness)) {
-            return buildAccess(playreadySchemes);
-          }
-          throw new Error(`Unsupported PlayReady config: ${keySystem}`);
-        }
-        if (keySystem === 'com.microsoft.playready' && playreadyRobustness.includes(robustness)) {
-          return buildAccess(playreadySchemes);
-        }
-        throw new Error(`Unsupported PlayReady key system: ${keySystem}`);
-      }
-
-      if (keySystem === 'com.apple.fps' && fairplay) {
-        assert.deepEqual(initDataTypes, ['sinf', 'skd']);
-        assert.ok(!initDataTypes.includes('cenc'));
-        return buildAccess(fairplaySchemes);
-      }
-
-      if (keySystem === 'org.w3.clearkey' && clearkey) {
-        return buildAccess(clearkeySchemes);
-      }
-
-      throw new Error(`Unsupported key system: ${keySystem}`);
+      throw new Error(`Unsupported key system / capability: ${keySystem}`);
     },
     mediaCapabilities: {
       async decodingInfo(config) {
         if (logCalls) {
           logCalls.mc.push(config);
+        }
+        if (config.keySystemConfiguration) {
+          if (config.type !== 'media-source') {
+            throw new TypeError("keySystemConfiguration is only supported for type: 'media-source'");
+          }
+          const ct = config.video?.contentType || '';
+          const scheme = config.keySystemConfiguration?.video?.encryptionScheme;
+          if (enforceMp4ForCenc && /^video\/webm\b/i.test(ct)) {
+            throw new Error(`DOMException: WebM cannot be paired with EME initDataType '${config.keySystemConfiguration.initDataType}' or scheme '${scheme}'`);
+          }
         }
         if (config.keySystemConfiguration && coupledSupport) {
           const coupledRes =
@@ -202,13 +244,13 @@ test('DRM_KEY_SYSTEMS, VIDEO_CODEC_PROFILES, and AUDIO_CODEC_PROFILES expose spe
   );
 });
 
-test('probeDrmKeySystems supports full 5-tier Widevine L1 / L2 / L3 ladder', async () => {
+test('probeDrmKeySystems supports full 5-tier Widevine L1 / L2 / L3 ladder and sets teeCrypto: true on HW_SECURE_DECODE', async () => {
   const cases = [
-    { tiers: ['HW_SECURE_ALL', 'SW_SECURE_CRYPTO'], expectedLevel: 'L1', expectedHw: true, expectedRob: 'HW_SECURE_ALL' },
-    { tiers: ['HW_SECURE_DECODE', 'SW_SECURE_CRYPTO'], expectedLevel: 'L1', expectedHw: true, expectedRob: 'HW_SECURE_DECODE' },
+    { tiers: ['HW_SECURE_ALL', 'SW_SECURE_CRYPTO'], expectedLevel: 'L1', expectedHw: true, expectedRob: 'HW_SECURE_ALL', expectedTeeCrypto: true },
+    { tiers: ['HW_SECURE_DECODE', 'SW_SECURE_CRYPTO'], expectedLevel: 'L1', expectedHw: true, expectedRob: 'HW_SECURE_DECODE', expectedTeeCrypto: true },
     { tiers: ['HW_SECURE_CRYPTO', 'SW_SECURE_CRYPTO'], expectedLevel: 'L2', expectedHw: false, expectedRob: 'HW_SECURE_CRYPTO', expectedTeeCrypto: true },
-    { tiers: ['SW_SECURE_DECODE'], expectedLevel: 'L3', expectedHw: false, expectedRob: 'SW_SECURE_DECODE' },
-    { tiers: ['SW_SECURE_CRYPTO'], expectedLevel: 'L3', expectedHw: false, expectedRob: 'SW_SECURE_CRYPTO' },
+    { tiers: ['SW_SECURE_DECODE'], expectedLevel: 'L3', expectedHw: false, expectedRob: 'SW_SECURE_DECODE', expectedTeeCrypto: false },
+    { tiers: ['SW_SECURE_CRYPTO'], expectedLevel: 'L3', expectedHw: false, expectedRob: 'SW_SECURE_CRYPTO', expectedTeeCrypto: false },
   ];
 
   for (const c of cases) {
@@ -219,8 +261,11 @@ test('probeDrmKeySystems supports full 5-tier Widevine L1 / L2 / L3 ladder', asy
     assert.equal(widevine.securityLevel, c.expectedLevel);
     assert.equal(widevine.hardwareBacked, c.expectedHw);
     assert.equal(widevine.robustness, c.expectedRob);
-    if (c.expectedTeeCrypto) {
-      assert.equal(widevine.teeCrypto, true);
+    assert.equal(widevine.teeCrypto, c.expectedTeeCrypto);
+    if (c.expectedRob === 'HW_SECURE_DECODE') {
+      assert.match(widevine.robustnessLabel, /TEE Crypto/i);
+      assert.match(widevine.notes, /teeCrypto: true/);
+      assert.match(widevine.notes, /HW_SECURE_ALL/);
     }
   }
 });
@@ -504,4 +549,279 @@ test('probeVideoCodecs and probeAudioCodecs handle decodingInfo rejections per c
   assert.equal(video.find((c) => c.codecId === 'hevc').status, 'hardware');
   assert.equal(audio.find((a) => a.codecId === 'ec3').supported, false);
   assert.equal(audio.find((a) => a.codecId === 'opus').supported, true);
+});
+
+test('v1.1.1: VP9 EME & coupled probes use CMAF video/mp4 (never video/webm + cenc/cbcs), PlayReady supports cbcs-1-9, and HEVC exposes hdrNote', async () => {
+  const hevcSpec = VIDEO_CODEC_PROFILES.find((c) => c.codecId === 'hevc');
+  assert.match(hevcSpec.hdrNote, /8-bit Main.*hvc1\.1/i);
+  assert.match(hevcSpec.hdrNote, /10-bit Main 10.*hvc1\.2/i);
+
+  const playreadySpec = DRM_KEY_SYSTEMS.find((d) => d.id === 'playready');
+  assert.ok(playreadySpec.candidateEncryptionSchemes.includes('cbcs-1-9'));
+
+  const calls = { eme: [], mc: [] };
+  const nav = createMockNavigator({
+    logCalls: calls,
+    widevineByCodec: {
+      avc1: [],
+      'video/mp4; codecs="vp09': ['HW_SECURE_ALL'],
+      av01: [],
+      hvc1: [],
+    },
+    widevineSchemesByCodec: {
+      vp09: ['cenc'],
+    },
+    playreadyKeySystems: {
+      'com.microsoft.playready.recommendation.3000': ['3000'],
+    },
+    playreadySchemes: ['cbcs-1-9'],
+    videoSupport: {
+      vp09: { supported: true, smooth: true, powerEfficient: true },
+    },
+  });
+
+  const report = await runFullMediaProbe(nav);
+  const wv = report.drm.find((d) => d.id === 'widevine');
+  const pr = report.drm.find((d) => d.id === 'playready');
+  assert.equal(wv.supportedCodecs.vp9.supported, true);
+  assert.equal(wv.supportedCodecs.vp9.contentType, 'video/mp4; codecs="vp09.00.41.08"');
+  assert.deepEqual(pr.encryptionSchemes, ['cbcs-1-9']);
+
+  for (const emeCall of calls.eme) {
+    for (const cfg of emeCall.configs || [emeCall.config]) {
+      for (const cap of cfg.videoCapabilities || []) {
+        if (String(cap.contentType).includes('vp09')) {
+          assert.match(cap.contentType, /^video\/mp4;/);
+          assert.doesNotMatch(cap.contentType, /^video\/webm;/);
+        }
+      }
+    }
+  }
+
+  const vp9CoupledChecks = report.encryptedStreaming.checks.filter((c) => c.codecId === 'vp9');
+  assert.equal(vp9CoupledChecks.length, 6);
+  assert.deepEqual(
+    vp9CoupledChecks.filter((c) => c.drmId === 'widevine').map((c) => [c.resolution, c.contentType]),
+    [
+      ['1080p60', 'video/mp4; codecs="vp09.00.41.08"'],
+      ['4K30', 'video/mp4; codecs="vp09.00.50.08"'],
+      ['4K60', 'video/mp4; codecs="vp09.00.51.08"'],
+    ]
+  );
+  assert.deepEqual(
+    vp9CoupledChecks.filter((c) => c.drmId === 'playready').map((c) => [c.resolution, c.contentType]),
+    [
+      ['1080p60', 'video/mp4; codecs="vp09.00.41.08"'],
+      ['4K30', 'video/mp4; codecs="vp09.00.50.08"'],
+      ['4K60', 'video/mp4; codecs="vp09.00.51.08"'],
+    ]
+  );
+  for (const mcCfg of calls.mc) {
+    if (mcCfg.keySystemConfiguration && String(mcCfg.video?.contentType).includes('vp09')) {
+      assert.match(mcCfg.video.contentType, /^video\/mp4;/);
+    }
+  }
+});
+
+test('v1.1.1: runFullMediaProbe(nav, { mediaType: "file" }) forces type: "media-source" in probeEncryptedStreaming without false L1 downgrade', async () => {
+  const calls = { eme: [], mc: [] };
+  const l1Nav = createMockNavigator({
+    logCalls: calls,
+    widevineRobustness: ['HW_SECURE_ALL'],
+    videoSupport: {
+      avc1: { supported: true, smooth: true, powerEfficient: true },
+      hvc1: { supported: true, smooth: true, powerEfficient: true },
+    },
+  });
+
+  const report = await runFullMediaProbe(l1Nav, { mediaType: 'file' });
+  assert.equal(report.mediaType, 'file');
+  assert.equal(report.encryptedStreaming.coupledSupported, true);
+  assert.equal(report.summary.coupledEncryptedVerified, true);
+  assert.equal(report.summary.estimatedMaxStreamingResolution, '4K / UHD');
+
+  const coupledCalls = calls.mc.filter((c) => Boolean(c.keySystemConfiguration));
+  assert.ok(coupledCalls.length > 0);
+  assert.ok(coupledCalls.every((c) => c.type === 'media-source'));
+});
+
+test('v1.1.1: Safari / Firefox < 129 ignoring or throwing on keySystemConfiguration never sets coupledSupported or false coupled-rejection', async () => {
+  // 1. Safari-like WebIDL silent ignore: returns { supported: true, powerEfficient: true } without keySystemAccess
+  const safariIgnoreNav = createMockNavigator({
+    widevineRobustness: ['HW_SECURE_ALL'],
+    coupledReturnsAccess: false,
+    videoSupport: {
+      hvc1: { supported: true, smooth: true, powerEfficient: true },
+    },
+  });
+  const ignoreReport = await runFullMediaProbe(safariIgnoreNav);
+  assert.equal(ignoreReport.encryptedStreaming.coupledSupported, false);
+  assert.equal(ignoreReport.summary.coupledEncryptedVerified, false);
+  assert.equal(ignoreReport.summary.estimatedMaxStreamingResolution, '4K / UHD');
+  assert.match(ignoreReport.encryptedStreaming.notes, /did not return MediaKeySystemAccess/i);
+  assert.match(ignoreReport.summary.headline, /uncoupled EME \+ MediaCapabilities/i);
+
+  // 2. Safari FairPlay ignoring keySystemConfiguration with 4K hardware clear decode
+  const safariFairPlayNav = createMockNavigator({
+    fairplay: true,
+    clearkey: false,
+    coupledReturnsAccess: false,
+    videoSupport: {
+      hvc1: { supported: true, smooth: true, powerEfficient: true },
+    },
+  });
+  const fpReport = await runFullMediaProbe(safariFairPlayNav);
+  assert.equal(fpReport.encryptedStreaming.coupledSupported, false);
+  assert.equal(fpReport.summary.coupledEncryptedVerified, false);
+  assert.equal(fpReport.summary.estimatedMaxStreamingResolution, '1080p–4K UHD (FairPlay; T2/Apple Silicon for 4K)');
+
+  // 3. Firefox < 129 throwing TypeError when keySystemConfiguration is passed
+  const ffOldNav = {
+    isSecureContext: true,
+    requestMediaKeySystemAccess: safariIgnoreNav.requestMediaKeySystemAccess,
+    mediaCapabilities: {
+      async decodingInfo(config) {
+        if (config.keySystemConfiguration) {
+          throw new TypeError('Unsupported keySystemConfiguration');
+        }
+        return { supported: true, smooth: true, powerEfficient: true };
+      },
+    },
+  };
+  const ffReport = await runFullMediaProbe(ffOldNav);
+  assert.equal(ffReport.encryptedStreaming.coupledSupported, false);
+  assert.equal(ffReport.summary.coupledEncryptedVerified, false);
+  assert.doesNotMatch(ffReport.summary.estimatedMaxStreamingResolution, /Coupled 1080p\/4K DRM Rejected/);
+  assert.equal(ffReport.summary.estimatedMaxStreamingResolution, '4K / UHD');
+});
+
+test('v1.1.1: probeHdcpPolicy prioritizes hardwareBacked DRMs (Edge PlayReady SL3000 before Widevine L3) and checks remaining HW DRMs before failing', async () => {
+  const checkedOrder = [];
+  const edgeNav = createMockNavigator({
+    widevineRobustness: ['SW_SECURE_CRYPTO'], // L3 -> output-restricted
+    playreadyKeySystems: {
+      'com.microsoft.playready.recommendation.3000': ['3000', undefined], // SL3000 -> usable
+    },
+    hdcpStatus: ({ keySystem }) => {
+      checkedOrder.push(keySystem);
+      return keySystem.startsWith('com.microsoft.playready') ? 'usable' : 'output-restricted';
+    },
+  });
+
+  const drm = await probeDrmKeySystems(edgeNav);
+  const hdcpWithDrm = await probeHdcpPolicy(edgeNav, { minHdcpVersion: '2.2', drmResults: drm });
+  assert.equal(hdcpWithDrm.compliant, true);
+  assert.equal(hdcpWithDrm.status, 'usable');
+  assert.equal(hdcpWithDrm.keySystem, 'com.microsoft.playready.recommendation.3000');
+  assert.deepEqual(checkedOrder, ['com.microsoft.playready.recommendation.3000']);
+  assert.equal(hdcpWithDrm.checkedSystems.length, 1);
+
+  // Also without drmResults passed: PlayReady SL3000 fallback must run BEFORE Widevine L3 fallback
+  const fallbackOrder = [];
+  const edgeNavNoDrm = createMockNavigator({
+    widevineRobustness: ['SW_SECURE_CRYPTO'],
+    playreadyKeySystems: {
+      'com.microsoft.playready.recommendation.3000': ['3000', undefined],
+    },
+    hdcpStatus: ({ keySystem }) => {
+      fallbackOrder.push(keySystem);
+      return keySystem.startsWith('com.microsoft.playready') ? 'usable' : 'output-restricted';
+    },
+  });
+  const hdcpNoDrm = await probeHdcpPolicy(edgeNavNoDrm, { minHdcpVersion: '2.2' });
+  assert.equal(hdcpNoDrm.compliant, true);
+  assert.equal(hdcpNoDrm.keySystem, 'com.microsoft.playready.recommendation.3000');
+  assert.deepEqual(fallbackOrder, ['com.microsoft.playready.recommendation.3000']);
+
+  // Dual hardware-backed DRMs where first returns output-restricted (or api-unsupported) and second returns usable
+  const dualHwOrder = [];
+  const dualHwNav = createMockNavigator({
+    widevineRobustness: ['HW_SECURE_ALL'],
+    playreadyKeySystems: {
+      'com.microsoft.playready.recommendation.3000': ['3000', undefined],
+    },
+    hdcpStatus: ({ keySystem }) => {
+      dualHwOrder.push(keySystem);
+      return keySystem === 'com.widevine.alpha' ? 'output-restricted' : 'usable';
+    },
+  });
+  const dualDrm = await probeDrmKeySystems(dualHwNav);
+  const dualHdcp = await probeHdcpPolicy(dualHwNav, { minHdcpVersion: '2.2', drmResults: dualDrm });
+  assert.equal(dualHdcp.compliant, true);
+  assert.equal(dualHdcp.keySystem, 'com.microsoft.playready.recommendation.3000');
+  assert.deepEqual(dualHwOrder, ['com.widevine.alpha', 'com.microsoft.playready.recommendation.3000']);
+  assert.equal(dualHdcp.checkedSystems.length, 2);
+  assert.equal(dualHdcp.checkedSystems[0].status, 'output-restricted');
+  assert.equal(dualHdcp.checkedSystems[1].status, 'usable');
+
+  // If first hardware DRM lacks getStatusForPolicy (api-unsupported), still continue to second hardware DRM
+  const apiUnsupportedFirstNav = createMockNavigator({
+    widevineRobustness: ['HW_SECURE_ALL'],
+    playreadyKeySystems: {
+      'com.microsoft.playready.recommendation.3000': ['3000', undefined],
+    },
+    hdcpUnsupported: ({ keySystem }) => keySystem === 'com.widevine.alpha',
+    hdcpStatus: 'usable',
+  });
+  const apiUnsupportedDrm = await probeDrmKeySystems(apiUnsupportedFirstNav);
+  const apiFallbackHdcp = await probeHdcpPolicy(apiUnsupportedFirstNav, {
+    minHdcpVersion: '2.2',
+    drmResults: apiUnsupportedDrm,
+  });
+  assert.equal(apiFallbackHdcp.compliant, true);
+  assert.equal(apiFallbackHdcp.keySystem, 'com.microsoft.playready.recommendation.3000');
+  assert.equal(apiFallbackHdcp.checkedSystems[0].status, 'api-unsupported');
+  assert.equal(apiFallbackHdcp.checkedSystems[1].status, 'usable');
+});
+
+test('v1.1.1: checkHdcp: true returning compliant: false downgrades estimatedMaxStreamingResolution & summary away from 4K / UHD', async () => {
+  const hdcpRestrictedL1Nav = createMockNavigator({
+    widevineRobustness: ['HW_SECURE_ALL'],
+    hdcpStatus: 'output-restricted',
+    videoSupport: {
+      av01: { supported: true, smooth: true, powerEfficient: true },
+      hvc1: { supported: true, smooth: true, powerEfficient: true },
+    },
+  });
+
+  const report = await runFullMediaProbe(hdcpRestrictedL1Nav, { checkHdcp: true, minHdcpVersion: '2.2' });
+  assert.equal(report.hdcp.checked, true);
+  assert.equal(report.hdcp.supported, true);
+  assert.equal(report.hdcp.compliant, false);
+  assert.equal(report.summary.estimatedMaxStreamingResolution, '1080p HD (HDCP 2.2 Restricted)');
+  assert.doesNotMatch(report.summary.estimatedMaxStreamingResolution, /4K|UHD/);
+  assert.doesNotMatch(report.summary.headline, /4K \/ UHD|likely 4K/);
+  assert.match(report.summary.headline, /HDCP 2\.2.*output-restricted/i);
+});
+
+test('v1.1.1: keySystem pre-check drastically reduces wasted requestMediaKeySystemAccess rejections on unsupported DRMs', async () => {
+  const calls = { eme: [], mc: [] };
+  const macChromeNav = createMockNavigator({
+    logCalls: calls,
+    widevineRobustness: ['SW_SECURE_CRYPTO'],
+    playreadyKeySystems: null, // unsupported
+    fairplay: false, // unsupported
+    clearkey: true,
+  });
+
+  await probeDrmKeySystems(macChromeNav);
+
+  const playreadyCalls = calls.eme.filter((c) => c.keySystem.startsWith('com.microsoft.playready'));
+  const fairplayCalls = calls.eme.filter((c) => c.keySystem === 'com.apple.fps');
+  // 4 distinct PlayReady keySystems => 4 pre-check rejections total (down from 40); FairPlay => 1 call (down from 4)
+  assert.equal(playreadyCalls.length, 4);
+  assert.equal(fairplayCalls.length, 1);
+
+  const safariCalls = { eme: [], mc: [] };
+  const safariNav = createMockNavigator({
+    logCalls: safariCalls,
+    widevineRobustness: [],
+    playreadyKeySystems: null,
+    fairplay: true,
+    clearkey: false,
+  });
+  await probeDrmKeySystems(safariNav);
+  const widevineCalls = safariCalls.eme.filter((c) => c.keySystem === 'com.widevine.alpha');
+  // Unsupported Widevine => 1 pre-check call (down from 20)
+  assert.equal(widevineCalls.length, 1);
 });

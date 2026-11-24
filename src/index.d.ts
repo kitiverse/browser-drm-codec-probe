@@ -44,6 +44,8 @@ export interface CodecDrmSupport {
   teeCrypto: boolean | null;
   robustness: string | null;
   matchedKeySystem: string | null;
+  encryptionSchemes: string[];
+  encryptionSchemeProbed: boolean;
 }
 
 export interface DrmProbeResult {
@@ -67,6 +69,7 @@ export interface DrmProbeResult {
 export interface VideoCodecProfileDefinition {
   resolution: VideoResolutionTier;
   contentType: string;
+  encryptedContentType?: string;
   width: number;
   height: number;
   framerate: number;
@@ -92,6 +95,7 @@ export interface AudioCodecSpec {
 export interface VideoProfileProbeResult {
   resolution: VideoResolutionTier;
   contentType: string;
+  encryptedContentType?: string;
   mediaType: MediaDecodingType;
   width: number;
   height: number;
@@ -148,6 +152,15 @@ export interface EncryptedStreamingCheck {
 export interface EncryptedStreamingReport {
   coupledSupported: boolean;
   checks: EncryptedStreamingCheck[];
+  notes?: string;
+}
+
+export interface HdcpCheckedSystem {
+  keySystem: string;
+  robustness: string | null;
+  hardwareBacked: boolean | null;
+  status: string;
+  compliant: boolean;
 }
 
 export interface HdcpPolicyResult {
@@ -157,6 +170,7 @@ export interface HdcpPolicyResult {
   minHdcpVersion: string;
   status: string;
   keySystem: string | null;
+  checkedSystems: HdcpCheckedSystem[];
   notes?: string;
 }
 
@@ -168,6 +182,8 @@ export interface MediaProbeSummary {
   estimatedMaxStreamingResolution:
     | '4K / UHD'
     | '1080p HD (Hardware DRM)'
+    | '1080p HD (HDCP 2.2 Restricted)'
+    | '1080p HD (HDCP Restricted)'
     | '720p HD (Coupled 1080p/4K DRM Rejected)'
     | '1080p–4K UHD (FairPlay; T2/Apple Silicon for 4K)'
     | 'Up to 1080p HD (FairPlay platform-managed)'

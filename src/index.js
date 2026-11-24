@@ -1,11 +1,11 @@
 /**
- * browser-drm-codec-probe v1.1.0
+ * browser-drm-codec-probe v1.1.1
  * Zero-dependency W3C EME DRM, HDCP 2.2 policy & MSE MediaCapabilities hardware decode inspector.
  */
 
 export const EME_VIDEO_CODECS = [
   { codecId: 'h264', contentType: 'video/mp4; codecs="avc1.64002a"' },
-  { codecId: 'vp9', contentType: 'video/webm; codecs="vp09.00.41.08"' },
+  { codecId: 'vp9', contentType: 'video/mp4; codecs="vp09.00.41.08"' },
   { codecId: 'av1', contentType: 'video/mp4; codecs="av01.0.09M.08"' },
   { codecId: 'hevc', contentType: 'video/mp4; codecs="hvc1.1.6.L123.90"' },
 ];
@@ -25,7 +25,7 @@ export const DRM_KEY_SYSTEMS = [
         hardwareBacked: true,
         teeCrypto: true,
         legacy: false,
-        robustnessLabel: 'Hardware TEE (Crypto + Decode)',
+        robustnessLabel: 'Hardware TEE (Crypto + Decode + Output)',
       },
       {
         keySystem: 'com.widevine.alpha',
@@ -33,9 +33,9 @@ export const DRM_KEY_SYSTEMS = [
         robustness: 'HW_SECURE_DECODE',
         securityLevel: 'L1',
         hardwareBacked: true,
-        teeCrypto: false,
+        teeCrypto: true,
         legacy: false,
-        robustnessLabel: 'Hardware Decode (Crypto/Decode Split)',
+        robustnessLabel: 'Hardware TEE Crypto + Secure Decode (Render Path May Differ)',
       },
       {
         keySystem: 'com.widevine.alpha',
@@ -73,7 +73,7 @@ export const DRM_KEY_SYSTEMS = [
     id: 'playready',
     keySystem: 'com.microsoft.playready.recommendation',
     name: 'Microsoft PlayReady',
-    candidateEncryptionSchemes: ['cenc', 'cbcs'],
+    candidateEncryptionSchemes: ['cenc', 'cbcs', 'cbcs-1-9'],
     candidates: [
       {
         keySystem: 'com.microsoft.playready.recommendation.3000',
@@ -229,6 +229,7 @@ export const VIDEO_CODEC_PROFILES = [
   {
     codecId: 'hevc',
     name: 'HEVC (H.265)',
+    hdrNote: '1080p60 probes 8-bit Main (hvc1.1); 4K30 and 4K60 probe 10-bit Main 10 (hvc1.2).',
     profiles: [
       { resolution: '1080p60', contentType: 'video/mp4; codecs="hvc1.1.6.L123.90"', width: 1920, height: 1080, framerate: 60, bitrate: 6_000_000 },
       { resolution: '4K30', contentType: 'video/mp4; codecs="hvc1.2.4.L150.B0"', width: 3840, height: 2160, framerate: 30, bitrate: 16_000_000 },
@@ -239,9 +240,33 @@ export const VIDEO_CODEC_PROFILES = [
     codecId: 'vp9',
     name: 'Google VP9',
     profiles: [
-      { resolution: '1080p60', contentType: 'video/webm; codecs="vp09.00.41.08"', width: 1920, height: 1080, framerate: 60, bitrate: 6_000_000 },
-      { resolution: '4K30', contentType: 'video/webm; codecs="vp09.00.50.08"', width: 3840, height: 2160, framerate: 30, bitrate: 16_000_000 },
-      { resolution: '4K60', contentType: 'video/webm; codecs="vp09.00.51.08"', width: 3840, height: 2160, framerate: 60, bitrate: 22_000_000 },
+      {
+        resolution: '1080p60',
+        contentType: 'video/webm; codecs="vp09.00.41.08"',
+        encryptedContentType: 'video/mp4; codecs="vp09.00.41.08"',
+        width: 1920,
+        height: 1080,
+        framerate: 60,
+        bitrate: 6_000_000,
+      },
+      {
+        resolution: '4K30',
+        contentType: 'video/webm; codecs="vp09.00.50.08"',
+        encryptedContentType: 'video/mp4; codecs="vp09.00.50.08"',
+        width: 3840,
+        height: 2160,
+        framerate: 30,
+        bitrate: 16_000_000,
+      },
+      {
+        resolution: '4K60',
+        contentType: 'video/webm; codecs="vp09.00.51.08"',
+        encryptedContentType: 'video/mp4; codecs="vp09.00.51.08"',
+        width: 3840,
+        height: 2160,
+        framerate: 60,
+        bitrate: 22_000_000,
+      },
     ],
   },
   {
@@ -302,7 +327,7 @@ function buildDrmNotes(specId, candidate) {
       return 'requestMediaKeySystemAccess resolved for HW_SECURE_ALL (L1). End-to-end 4K playback also requires valid device keybox provisioning and HDCP output protection.';
     }
     if (candidate.robustness === 'HW_SECURE_DECODE') {
-      return 'Hardware-protected decode (HW_SECURE_DECODE, L1) with crypto/decode split. End-to-end 4K playback also depends on keybox provisioning and HDCP compliance.';
+      return 'Widevine L1 (HW_SECURE_DECODE): provides hardware TEE crypto and hardware-secure video decode (teeCrypto: true), differing from HW_SECURE_ALL in that the full rendering/output path may not be hardware-protected. End-to-end 4K playback also requires device keybox provisioning and HDCP compliance.';
     }
     if (candidate.robustness === 'HW_SECURE_CRYPTO') {
       return 'Widevine L2 (HW_SECURE_CRYPTO): TEE secures key cryptography (teeCrypto: true), while video decode runs outside a full hardware-protected decode path.';
@@ -358,9 +383,48 @@ async function probeConfirmedEncryptionSchemes(targetNav, matchedCandidate, prob
   return { encryptionSchemes: confirmed, encryptionSchemeProbed: probed };
 }
 
+async function checkKeySystemAvailable(targetNav, spec, candidate, preCheckCache) {
+  const cacheKey = `${candidate.keySystem}|${candidate.initDataTypes.join(',')}`;
+  if (preCheckCache.has(cacheKey)) {
+    return preCheckCache.get(cacheKey);
+  }
+
+  const sameKeySystemCandidates = spec.candidates.filter((c) => c.keySystem === candidate.keySystem);
+  const lowestRobustness =
+    spec.id === 'widevine'
+      ? 'SW_SECURE_CRYPTO'
+      : sameKeySystemCandidates.some((c) => c.robustness === undefined)
+      ? undefined
+      : sameKeySystemCandidates[sameKeySystemCandidates.length - 1]?.robustness;
+
+  const distinctRobustnesses = [];
+  for (const r of [lowestRobustness, ...sameKeySystemCandidates.map((c) => c.robustness).reverse()]) {
+    if (!distinctRobustnesses.includes(r)) {
+      distinctRobustnesses.push(r);
+    }
+  }
+
+  const supportedConfigurations = distinctRobustnesses.map((robustness) => ({
+    initDataTypes: candidate.initDataTypes,
+    videoCapabilities: EME_VIDEO_CODECS.map((c) =>
+      robustness ? { contentType: c.contentType, robustness } : { contentType: c.contentType }
+    ),
+  }));
+
+  try {
+    await targetNav.requestMediaKeySystemAccess(candidate.keySystem, supportedConfigurations);
+    preCheckCache.set(cacheKey, true);
+    return true;
+  } catch {
+    preCheckCache.set(cacheKey, false);
+    return false;
+  }
+}
+
 export async function probeDrmKeySystems(nav) {
   const targetNav = resolveNavigator(nav);
   const canProbe = Boolean(targetNav && typeof targetNav.requestMediaKeySystemAccess === 'function');
+  const preCheckCache = new Map();
   const results = [];
 
   for (const spec of DRM_KEY_SYSTEMS) {
@@ -376,15 +440,21 @@ export async function probeDrmKeySystems(nav) {
           teeCrypto: false,
           robustness: null,
           matchedKeySystem: null,
+          encryptionSchemes: [],
+          encryptionSchemeProbed: false,
         },
       ])
     );
 
+    const matchedCodecCandidates = {};
     let bestMatch = null;
 
     if (canProbe) {
       for (let idx = 0; idx < spec.candidates.length; idx++) {
         const candidate = spec.candidates[idx];
+        if (!(await checkKeySystemAvailable(targetNav, spec, candidate, preCheckCache))) {
+          continue;
+        }
         for (const codec of EME_VIDEO_CODECS) {
           if (supportedCodecs[codec.codecId].supported) continue;
 
@@ -404,7 +474,10 @@ export async function probeDrmKeySystems(nav) {
               teeCrypto: candidate.teeCrypto,
               robustness: candidate.robustness ?? null,
               matchedKeySystem: candidate.keySystem,
+              encryptionSchemes: [],
+              encryptionSchemeProbed: false,
             };
+            matchedCodecCandidates[codec.codecId] = candidate;
             if (!bestMatch || idx < bestMatch.candidateIndex) {
               bestMatch = {
                 candidate,
@@ -418,17 +491,31 @@ export async function probeDrmKeySystems(nav) {
           }
         }
       }
+
+      for (const codec of EME_VIDEO_CODECS) {
+        const codecCandidate = matchedCodecCandidates[codec.codecId];
+        if (!codecCandidate) continue;
+        const codecSchemeProbe = await probeConfirmedEncryptionSchemes(
+          targetNav,
+          codecCandidate,
+          codec.contentType,
+          spec.candidateEncryptionSchemes
+        );
+        supportedCodecs[codec.codecId].encryptionSchemes = codecSchemeProbe.encryptionSchemes;
+        supportedCodecs[codec.codecId].encryptionSchemeProbed = codecSchemeProbe.encryptionSchemeProbed;
+      }
     }
 
     const matchedCandidate = bestMatch?.candidate ?? null;
-    const schemeProbe = matchedCandidate
-      ? await probeConfirmedEncryptionSchemes(
-          targetNav,
-          matchedCandidate,
-          bestMatch.contentType,
-          spec.candidateEncryptionSchemes
-        )
-      : { encryptionSchemes: [], encryptionSchemeProbed: false };
+    const confirmedSchemeSet = new Set();
+    let anySchemeProbed = false;
+    for (const codec of EME_VIDEO_CODECS) {
+      const c = supportedCodecs[codec.codecId];
+      if (!c.supported) continue;
+      if (c.encryptionSchemeProbed) anySchemeProbed = true;
+      for (const s of c.encryptionSchemes) confirmedSchemeSet.add(s);
+    }
+    const encryptionSchemes = spec.candidateEncryptionSchemes.filter((s) => confirmedSchemeSet.has(s));
 
     results.push({
       id: spec.id,
@@ -442,8 +529,8 @@ export async function probeDrmKeySystems(nav) {
       legacy: matchedCandidate ? Boolean(matchedCandidate.legacy) : false,
       robustness: matchedCandidate?.robustness ?? null,
       robustnessLabel: matchedCandidate ? matchedCandidate.robustnessLabel : null,
-      encryptionSchemes: schemeProbe.encryptionSchemes,
-      encryptionSchemeProbed: schemeProbe.encryptionSchemeProbed,
+      encryptionSchemes,
+      encryptionSchemeProbed: anySchemeProbed,
       supportedCodecs,
       notes: buildDrmNotes(spec.id, matchedCandidate),
     });
@@ -473,6 +560,7 @@ export async function probeVideoCodecs(nav, options = {}) {
       profileResults.push({
         resolution: profile.resolution,
         contentType: profile.contentType,
+        ...(profile.encryptedContentType ? { encryptedContentType: profile.encryptedContentType } : {}),
         mediaType,
         width: profile.width,
         height: profile.height,
@@ -563,9 +651,10 @@ export async function probeAudioCodecs(nav, options = {}) {
   return results;
 }
 
-export async function probeEncryptedStreaming(nav, drmResults, videoCodecs, options = {}) {
+export async function probeEncryptedStreaming(nav, drmResults, videoCodecs, _options = {}) {
   const targetNav = resolveNavigator(nav);
-  const mediaType = options.mediaType === 'file' ? 'file' : 'media-source';
+  // W3C MediaCapabilities & Chromium media_capabilities.cc reject keySystemConfiguration with type: 'file'.
+  const mediaType = 'media-source';
   const canQueryMc = Boolean(targetNav?.mediaCapabilities && typeof targetNav.mediaCapabilities.decodingInfo === 'function');
   const commercialDrms = (drmResults || []).filter((d) => d.supported && d.id !== 'clearkey');
   const checks = [];
@@ -576,14 +665,27 @@ export async function probeEncryptedStreaming(nav, drmResults, videoCodecs, opti
 
   for (const drm of commercialDrms) {
     const initDataType = drm.id === 'fairplay' ? 'sinf' : 'cenc';
-    const scheme = drm.encryptionSchemes?.[0];
 
     for (const codec of videoCodecs || []) {
       const codecDrm = drm.supportedCodecs?.[codec.codecId];
       if (!codecDrm?.supported || !codec.supported) continue;
 
+      const scheme =
+        typeof codecDrm.encryptionSchemeProbed === 'boolean'
+          ? codecDrm.encryptionSchemeProbed
+            ? codecDrm.encryptionSchemes?.[0]
+            : undefined
+          : drm.encryptionSchemeProbed
+          ? drm.encryptionSchemes?.[0]
+          : undefined;
+
       const targetProfiles = codec.profiles.filter((p) => p.supported);
       for (const profile of targetProfiles) {
+        let probeContentType = profile.encryptedContentType || profile.contentType;
+        if (codec.codecId === 'vp9' && /^video\/webm\b/i.test(probeContentType)) {
+          probeContentType = probeContentType.replace(/^video\/webm\b/i, 'video/mp4');
+        }
+
         const keySystemConfiguration = {
           keySystem: codecDrm.matchedKeySystem || drm.matchedKeySystem || drm.keySystem,
           initDataType,
@@ -596,7 +698,7 @@ export async function probeEncryptedStreaming(nav, drmResults, videoCodecs, opti
         const info = await safeDecodingInfo(targetNav, {
           type: mediaType,
           video: {
-            contentType: profile.contentType,
+            contentType: probeContentType,
             width: profile.width,
             height: profile.height,
             bitrate: profile.bitrate,
@@ -610,7 +712,7 @@ export async function probeEncryptedStreaming(nav, drmResults, videoCodecs, opti
           keySystem: keySystemConfiguration.keySystem,
           codecId: codec.codecId,
           resolution: profile.resolution,
-          contentType: profile.contentType,
+          contentType: probeContentType,
           drmSecurityLevel: codecDrm.securityLevel,
           drmHardwareBacked: codecDrm.hardwareBacked,
           supported: info.supported,
@@ -622,9 +724,16 @@ export async function probeEncryptedStreaming(nav, drmResults, videoCodecs, opti
     }
   }
 
+  const coupledSupported = checks.some((c) => c.coupledKeySystemVerified);
   return {
-    coupledSupported: checks.some((c) => c.coupledKeySystemVerified),
+    coupledSupported,
     checks,
+    ...(checks.length > 0 && !coupledSupported
+      ? {
+          notes:
+            'Browser did not return MediaKeySystemAccess for MediaCapabilities.decodingInfo({ keySystemConfiguration }) (such as Safari or Firefox < 129 ignoring the WebIDL field); estimates fall back to uncoupled EME + MediaCapabilities.',
+        }
+      : {}),
   };
 }
 
@@ -641,40 +750,70 @@ export async function probeHdcpPolicy(nav, options = {}) {
       minHdcpVersion,
       status: 'eme-unsupported',
       keySystem: null,
+      checkedSystems: [],
       notes: 'Encrypted Media Extensions (EME) API is unavailable in this environment.',
     };
   }
 
   const candidateSpecs = [];
   if (Array.isArray(drmResults)) {
-    const ordered = ['widevine', 'playready', 'fairplay']
-      .map((id) => drmResults.find((d) => d.id === id && d.supported))
-      .filter(Boolean);
+    const hwRank = (hw) => (hw === true ? 0 : hw === null ? 1 : 2);
+    const tieOrder = { widevine: 0, playready: 1, fairplay: 2 };
+    const ordered = drmResults
+      .filter((d) => d && d.supported && d.id !== 'clearkey')
+      .slice()
+      .sort(
+        (a, b) =>
+          hwRank(a.hardwareBacked) - hwRank(b.hardwareBacked) ||
+          (tieOrder[a.id] ?? 9) - (tieOrder[b.id] ?? 9)
+      );
+
     for (const d of ordered) {
-      const supportedCodec = Object.values(d.supportedCodecs || {}).find((c) => c.supported);
+      const codecEntries = Object.values(d.supportedCodecs || {});
+      const supportedCodec =
+        codecEntries.find((c) => c.supported && c.hardwareBacked === d.hardwareBacked) ||
+        codecEntries.find((c) => c.supported);
       const spec = DRM_KEY_SYSTEMS.find((s) => s.id === d.id);
-      const matchedCand = spec?.candidates.find((c) => c.keySystem === (d.matchedKeySystem || d.keySystem) && (c.robustness ?? null) === d.robustness);
+      const matchedCand = spec?.candidates.find(
+        (c) => c.keySystem === (d.matchedKeySystem || d.keySystem) && (c.robustness ?? null) === d.robustness
+      );
       candidateSpecs.push({
         keySystem: d.matchedKeySystem || d.keySystem,
         initDataTypes: matchedCand?.initDataTypes || (d.id === 'fairplay' ? ['sinf', 'skd'] : ['cenc']),
         contentType: supportedCodec?.contentType || EME_VIDEO_CODECS[0].contentType,
         robustness: d.robustness || undefined,
+        hardwareBacked: d.hardwareBacked,
       });
     }
   }
 
   if (candidateSpecs.length === 0) {
     candidateSpecs.push(
-      { keySystem: 'com.widevine.alpha', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, robustness: 'HW_SECURE_ALL' },
-      { keySystem: 'com.widevine.alpha', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, robustness: 'SW_SECURE_CRYPTO' },
-      { keySystem: 'com.microsoft.playready.recommendation.3000', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType },
-      { keySystem: 'com.microsoft.playready.recommendation', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, robustness: '3000' },
-      { keySystem: 'com.apple.fps', initDataTypes: ['sinf', 'skd'], contentType: EME_VIDEO_CODECS[0].contentType }
+      { keySystem: 'com.widevine.alpha', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, robustness: 'HW_SECURE_ALL', hardwareBacked: true },
+      { keySystem: 'com.widevine.alpha', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, robustness: 'HW_SECURE_DECODE', hardwareBacked: true },
+      { keySystem: 'com.microsoft.playready.recommendation.3000', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, hardwareBacked: true },
+      { keySystem: 'com.microsoft.playready.recommendation.3000', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, robustness: '3000', hardwareBacked: true },
+      { keySystem: 'com.microsoft.playready.recommendation.3000.clearlead', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, hardwareBacked: true },
+      { keySystem: 'com.microsoft.playready.recommendation', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, robustness: '3000', hardwareBacked: true },
+      { keySystem: 'com.apple.fps', initDataTypes: ['sinf', 'skd'], contentType: EME_VIDEO_CODECS[0].contentType, hardwareBacked: null },
+      { keySystem: 'com.widevine.alpha', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, robustness: 'SW_SECURE_CRYPTO', hardwareBacked: false },
+      { keySystem: 'com.microsoft.playready.recommendation', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, robustness: '2000', hardwareBacked: false },
+      { keySystem: 'com.microsoft.playready.recommendation', initDataTypes: ['cenc'], contentType: EME_VIDEO_CODECS[0].contentType, hardwareBacked: false }
     );
   }
 
+  const checkedSystems = [];
+  const probedKeySystems = new Set();
+  let firstNonCompliant = null;
+  let firstUnsupported = null;
   let lastError = null;
-  for (const spec of candidateSpecs) {
+
+  for (let i = 0; i < candidateSpecs.length; i++) {
+    const spec = candidateSpecs[i];
+    if (probedKeySystems.has(spec.keySystem)) {
+      continue;
+    }
+
     try {
       const access = await targetNav.requestMediaKeySystemAccess(spec.keySystem, [
         {
@@ -686,33 +825,81 @@ export async function probeHdcpPolicy(nav, options = {}) {
       ]);
       if (typeof access?.createMediaKeys !== 'function') continue;
       const mediaKeys = await access.createMediaKeys();
+      probedKeySystems.add(spec.keySystem);
+
       if (typeof mediaKeys?.getStatusForPolicy !== 'function') {
+        checkedSystems.push({
+          keySystem: spec.keySystem,
+          robustness: spec.robustness ?? null,
+          hardwareBacked: spec.hardwareBacked,
+          status: 'api-unsupported',
+          compliant: false,
+        });
+        if (!firstUnsupported) {
+          firstUnsupported = {
+            checked: true,
+            supported: false,
+            compliant: false,
+            minHdcpVersion,
+            status: 'api-unsupported',
+            keySystem: spec.keySystem,
+            notes: 'MediaKeys.getStatusForPolicy() is not implemented in this browser.',
+          };
+        }
+        continue;
+      }
+
+      const status = await mediaKeys.getStatusForPolicy({ minHdcpVersion });
+      const compliant = status === 'usable';
+      checkedSystems.push({
+        keySystem: spec.keySystem,
+        robustness: spec.robustness ?? null,
+        hardwareBacked: spec.hardwareBacked,
+        status,
+        compliant,
+      });
+
+      if (compliant) {
         return {
           checked: true,
-          supported: false,
-          compliant: false,
+          supported: true,
+          compliant: true,
           minHdcpVersion,
-          status: 'api-unsupported',
+          status,
           keySystem: spec.keySystem,
-          notes: 'MediaKeys.getStatusForPolicy() is not implemented in this browser.',
+          checkedSystems,
+          notes: `Display pipeline reports usable HDCP ${minHdcpVersion}+ output protection.`,
         };
       }
-      const status = await mediaKeys.getStatusForPolicy({ minHdcpVersion });
-      return {
-        checked: true,
-        supported: true,
-        compliant: status === 'usable',
-        minHdcpVersion,
-        status,
-        keySystem: spec.keySystem,
-        notes:
-          status === 'usable'
-            ? `Display pipeline reports usable HDCP ${minHdcpVersion}+ output protection.`
-            : `Display pipeline returned "${status}" for HDCP ${minHdcpVersion}.`,
-      };
+
+      if (!firstNonCompliant) {
+        firstNonCompliant = {
+          checked: true,
+          supported: true,
+          compliant: false,
+          minHdcpVersion,
+          status,
+          keySystem: spec.keySystem,
+          notes: `Display pipeline returned "${status}" for HDCP ${minHdcpVersion}.`,
+        };
+      }
+
+      const hasMoreHardwareSpecs = candidateSpecs
+        .slice(i + 1)
+        .some((next) => next.hardwareBacked === true && !probedKeySystems.has(next.keySystem));
+      if (!hasMoreHardwareSpecs) {
+        break;
+      }
     } catch (err) {
       lastError = err;
     }
+  }
+
+  if (firstNonCompliant) {
+    return { ...firstNonCompliant, checkedSystems };
+  }
+  if (firstUnsupported) {
+    return { ...firstUnsupported, checkedSystems };
   }
 
   return {
@@ -722,6 +909,7 @@ export async function probeHdcpPolicy(nav, options = {}) {
     minHdcpVersion,
     status: 'error',
     keySystem: null,
+    checkedSystems,
     notes: lastError?.message || 'Unable to instantiate MediaKeys for HDCP policy check.',
   };
 }
@@ -741,7 +929,15 @@ export async function runFullMediaProbe(nav, options = {}) {
   const encryptedStreaming = await probeEncryptedStreaming(targetNav, drm, videoCodecs, { mediaType });
   const hdcp = options.checkHdcp
     ? await probeHdcpPolicy(targetNav, { minHdcpVersion, drmResults: drm })
-    : { checked: false, supported: null, compliant: null, minHdcpVersion, status: 'not-probed', keySystem: null };
+    : {
+        checked: false,
+        supported: null,
+        compliant: null,
+        minHdcpVersion,
+        status: 'not-probed',
+        keySystem: null,
+        checkedSystems: [],
+      };
 
   const widevine = drm.find((d) => d.id === 'widevine');
   const playready = drm.find((d) => d.id === 'playready');
@@ -757,13 +953,18 @@ export async function runFullMediaProbe(nav, options = {}) {
 
   const is4kRes = (res) => res === '4K30' || res === '4K60';
   const coupled4kHw = encryptedStreaming.checks.some(
-    (c) => c.supported && c.powerEfficient && c.drmHardwareBacked && is4kRes(c.resolution)
+    (c) => c.supported && c.coupledKeySystemVerified && c.powerEfficient && c.drmHardwareBacked && is4kRes(c.resolution)
   );
   const coupled1080Hw = encryptedStreaming.checks.some(
-    (c) => c.supported && c.drmHardwareBacked && c.resolution === '1080p60'
+    (c) => c.supported && c.coupledKeySystemVerified && c.drmHardwareBacked && c.resolution === '1080p60'
   );
   const coupled4kFairPlay = encryptedStreaming.checks.some(
-    (c) => c.supported && c.powerEfficient && c.drmId === 'fairplay' && is4kRes(c.resolution)
+    (c) =>
+      c.supported &&
+      c.coupledKeySystemVerified &&
+      c.powerEfficient &&
+      c.drmId === 'fairplay' &&
+      is4kRes(c.resolution)
   );
 
   // Also intersect per-codec DRM hardware backing with per-codec 4K hardware decode
@@ -774,42 +975,72 @@ export async function runFullMediaProbe(nav, options = {}) {
         (vc) => d.supportedCodecs?.[vc.codecId]?.hardwareBacked === true && is4kRes(vc.maxHardwareResolution)
       )
   );
-  const has4kHardwareDrm = encryptedStreaming.checks.length > 0 ? coupled4kHw && perCodec4kHw : perCodec4kHw;
   const hasClear4kHw = videoCodecs.some((c) => is4kRes(c.maxHardwareResolution));
-
   const hasSoftwareOrL2Drm = Boolean(widevine?.supported || playready?.supported);
 
   let estimatedMaxStreamingResolution = 'Unverified (No EME DRM)';
   if (highestHardwareDrm) {
-    if (has4kHardwareDrm) {
-      estimatedMaxStreamingResolution = '4K / UHD';
-    } else if (coupled1080Hw || encryptedStreaming.checks.length === 0) {
-      estimatedMaxStreamingResolution = '1080p HD (Hardware DRM)';
+    if (encryptedStreaming.coupledSupported) {
+      if (coupled4kHw && perCodec4kHw) {
+        estimatedMaxStreamingResolution = '4K / UHD';
+      } else if (coupled1080Hw) {
+        estimatedMaxStreamingResolution = '1080p HD (Hardware DRM)';
+      } else {
+        estimatedMaxStreamingResolution = '720p HD (Coupled 1080p/4K DRM Rejected)';
+      }
     } else {
-      estimatedMaxStreamingResolution = '720p HD (Coupled 1080p/4K DRM Rejected)';
+      estimatedMaxStreamingResolution = perCodec4kHw ? '4K / UHD' : '1080p HD (Hardware DRM)';
     }
   } else if (platformManagedDrm) {
-    estimatedMaxStreamingResolution =
-      coupled4kFairPlay || hasClear4kHw
+    if (encryptedStreaming.coupledSupported) {
+      estimatedMaxStreamingResolution = coupled4kFairPlay
         ? '1080p–4K UHD (FairPlay; T2/Apple Silicon for 4K)'
         : 'Up to 1080p HD (FairPlay platform-managed)';
+    } else {
+      estimatedMaxStreamingResolution = hasClear4kHw
+        ? '1080p–4K UHD (FairPlay; T2/Apple Silicon for 4K)'
+        : 'Up to 1080p HD (FairPlay platform-managed)';
+    }
   } else if (widevineTier === 'L2') {
     estimatedMaxStreamingResolution = '720p–1080p HD (Widevine L2; TEE Crypto Only)';
   } else if (hasSoftwareOrL2Drm) {
     estimatedMaxStreamingResolution = '720p HD (Software DRM Cap)';
   }
 
+  const hdcpRestricted = Boolean(hdcp.checked && hdcp.supported === true && hdcp.compliant === false);
+  const hdcpRestrictedLabel =
+    minHdcpVersion === '2.2' ? '1080p HD (HDCP 2.2 Restricted)' : '1080p HD (HDCP Restricted)';
+  if (
+    hdcpRestricted &&
+    (estimatedMaxStreamingResolution === '4K / UHD' ||
+      estimatedMaxStreamingResolution === '1080p–4K UHD (FairPlay; T2/Apple Silicon for 4K)')
+  ) {
+    estimatedMaxStreamingResolution = hdcpRestrictedLabel;
+  }
+
   const hwCodecs = videoCodecs.filter((c) => c.hardwareAccelerated).map((c) => c.codecId.toUpperCase());
   const hwLabel = hwCodecs.length ? hwCodecs.join(', ') : 'None (CPU software decode)';
   const emeSupported = Boolean(targetNav && typeof targetNav.requestMediaKeySystemAccess === 'function');
+  const uncoupledNote =
+    !encryptedStreaming.coupledSupported && encryptedStreaming.checks.length > 0
+      ? ' (uncoupled EME + MediaCapabilities estimate; browser did not verify keySystemConfiguration)'
+      : '';
 
   let headline;
   if (!emeSupported && !isSecureContext) {
     headline = `EME DRM unavailable in insecure context (isSecureContext: false — HTTPS or localhost required); GPU decode: ${hwLabel}.`;
   } else if (highestHardwareDrm) {
-    headline = `Hardware DRM (${highestHardwareDrm}) detected — likely ${estimatedMaxStreamingResolution}; GPU decode: ${hwLabel}.`;
+    if (hdcpRestricted) {
+      headline = `Hardware DRM (${highestHardwareDrm}) detected, but HDCP ${minHdcpVersion} returned "${hdcp.status}" — capped at ${estimatedMaxStreamingResolution}${uncoupledNote}; GPU decode: ${hwLabel}.`;
+    } else {
+      headline = `Hardware DRM (${highestHardwareDrm}) detected — likely ${estimatedMaxStreamingResolution}${uncoupledNote}; GPU decode: ${hwLabel}.`;
+    }
   } else if (platformManagedDrm) {
-    headline = `Apple FairPlay (platform-managed) detected — 4K requires Apple Silicon or Intel T2+ + HDCP 2.2 (pre-T2 Macs typically cap at 1080p); GPU decode: ${hwLabel}.`;
+    if (hdcpRestricted) {
+      headline = `Apple FairPlay (platform-managed) detected, but HDCP ${minHdcpVersion} returned "${hdcp.status}" — capped at ${estimatedMaxStreamingResolution}${uncoupledNote}; GPU decode: ${hwLabel}.`;
+    } else {
+      headline = `Apple FairPlay (platform-managed) detected — 4K requires Apple Silicon or Intel T2+ + HDCP 2.2 (pre-T2 Macs typically cap at 1080p)${uncoupledNote}; GPU decode: ${hwLabel}.`;
+    }
   } else if (widevineTier === 'L2') {
     headline = `Widevine L2 (HW_SECURE_CRYPTO) detected — hardware crypto with software decode; GPU decode: ${hwLabel}.`;
   } else if (hasSoftwareOrL2Drm) {

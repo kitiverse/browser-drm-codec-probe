@@ -55,8 +55,8 @@ console.log(hdcpReport.hdcp);
 - `probeDrmKeySystems(nav?)` — Probes Widevine 5-tier L1/L2/L3 ladder, modern PlayReady `.recommendation.3000` / `.clearlead` / `.recommendation` / legacy fallback, FairPlay (`sinf`, `skd`), and ClearKey across H.264, VP9, AV1, and HEVC, plus `getConfiguration()`-verified `encryptionSchemes`.
 - `probeVideoCodecs(nav?, { mediaType?: 'media-source' | 'file' })` — Queries `MediaCapabilities.decodingInfo()` (defaults to `'media-source'`) across `1080p60`, `4K30`, and `4K60`.
 - `probeAudioCodecs(nav?, { mediaType?: 'media-source' | 'file' })` — Queries `Opus`, `AAC-LC`, `FLAC` (automatically falling back to `'file'` if `'media-source'` rejects raw `audio/flac`), and `Dolby Digital Plus (EC-3)`.
-- `probeEncryptedStreaming(nav, drmResults, videoCodecs, { mediaType? })` — Queries coupled `MediaCapabilities.decodingInfo({ type: 'media-source', video, keySystemConfiguration })`.
-- `probeHdcpPolicy(nav?, { minHdcpVersion?: '2.2', drmResults? })` — Opt-in helper calling `createMediaKeys().getStatusForPolicy({ minHdcpVersion })`.
+- `probeEncryptedStreaming(nav, drmResults, videoCodecs, { mediaType? })` — Always forces `type: 'media-source'` (per W3C MediaCapabilities) and uses CMAF/MP4 containers for coupled `MediaCapabilities.decodingInfo({ type: 'media-source', video, keySystemConfiguration })`.
+- `probeHdcpPolicy(nav?, { minHdcpVersion?: '2.2', drmResults? })` — Opt-in helper prioritizing `hardwareBacked` key systems first (e.g., PlayReady SL3000 before Widevine L3 on Edge) and checking remaining hardware-backed systems before returning `compliant: false` via `createMediaKeys().getStatusForPolicy({ minHdcpVersion })`.
 - `runFullMediaProbe(nav?, { mediaType?, checkHdcp?, minHdcpVersion?, isSecureContext? })` — Runs probes concurrently and builds a structured JSON report including `environmentSupported.isSecureContext` and `summary`.
 
 All functions accept an optional `Navigator`-like object for dependency injection in tests and degrade safely in SSR or Node environments.
