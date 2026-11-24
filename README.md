@@ -1,25 +1,30 @@
 # browser-drm-codec-probe
 
-Zero-dependency browser diagnostic library that probes **W3C Encrypted Media Extensions (EME)** DRM security tiers (`Widevine L1` vs `L3`, `PlayReady SL3000`/`SL2000`, `Apple FairPlay`, `ClearKey`) and **MediaCapabilities** GPU hardware decoding support (`AV1`, `HEVC`, `VP9`, `H.264`, plus `Opus`, `AAC-LC`, `FLAC`, `Dolby Digital Plus EC-3`).
+Zero-dependency browser diagnostic library that probes **W3C Encrypted Media Extensions (EME)** DRM security tiers (`Widevine L1 / L2 / L3`, modern `PlayReady SL3000 / SL2000`, `Apple FairPlay`, `ClearKey`), verified `encryptionScheme` support, opt-in **HDCP 2.2** output protection (`getStatusForPolicy`), and **MSE MediaCapabilities** (`type: 'media-source'`) video/audio decoding across `1080p60`, `4K30`, and `4K60`.
 
 👉 **[Try Live in Browser (No Install)](https://kitiverse.com/hardware/video-drm-codec-tester/)**
 
 ## Why This Exists
 
-Streaming quality and playback efficiency in web browsers depend on two browser subsystems rather than raw internet speed alone:
+Streaming quality and playback efficiency in browsers depend on multiple interacting subsystems rather than raw internet speed alone:
 
-1. **EME DRM Robustness Tier**: Determines whether protected streams unlock `1080p`/`4K` HDR or get capped at `720p`/`480p`.
-2. **`MediaCapabilities.decodingInfo()` Flags**: Distinguishes dedicated GPU fixed-function video silicon (`powerEfficient: true`) from high-CPU software fallback (`powerEfficient: false`).
+1. **EME DRM Robustness & Per-Codec Tiers**: Probes Widevine (`HW_SECURE_ALL`, `HW_SECURE_DECODE`, `HW_SECURE_CRYPTO`, `SW_SECURE_DECODE`, `SW_SECURE_CRYPTO`), PlayReady (`com.microsoft.playready.recommendation.3000` / `.clearlead` / `.recommendation` / legacy fallback), Apple FairPlay (`com.apple.fps` with `sinf`/`skd`), and ClearKey across `H.264`, `VP9`, `AV1`, and `HEVC`.
+2. **Verified `encryptionScheme` Probing**: Actively tests `cenc`, `cbcs`, and `cbcs-1-9` and checks `access.getConfiguration().videoCapabilities[0].encryptionScheme` so browsers that silently ignore unknown WebIDL dictionary members never produce false positives.
+3. **Coupled MSE `MediaCapabilities.decodingInfo()`**: Defaults to `type: 'media-source'` (what adaptive streaming players use) across spec-accurate `1080p60`, `4K30`, and `4K60` codec levels and optionally pairs `keySystemConfiguration` so 4K estimates verify DRM and 4K decode together.
+4. **Opt-In HDCP 2.2 Output Policy**: Only instantiates a CDM (`createMediaKeys().getStatusForPolicy({ minHdcpVersion: '2.2' })`) when explicitly requested (`{ checkHdcp: true }`).
 
-| Platform / Browser Setup | Typical DRM Tier Detected | Video Hardware Codecs | Expected Streaming Cap |
+| Platform / Browser Setup | Typical DRM Tier Detected | Video Codecs (`1080p60` / `4K30` / `4K60`) | Expected Streaming Cap |
 | :--- | :--- | :--- | :--- |
-| **Android Chrome / Chromebook (Hardware TEE)** | Widevine `L1` (`HW_SECURE_ALL`) | H.264, VP9, AV1 (newer SoCs) | **1080p / 4K UHD** |
-| **Windows Edge (Supported GPU + HDCP 2.2)** | PlayReady `SL3000` (+ Widevine `L3`) | H.264, HEVC, VP9, AV1 | **4K UHD + HDR** |
-| **macOS Safari (Apple Silicon / Intel T2+)** | Apple FairPlay (`TEE`) | H.264, HEVC, AV1 (M3+) | **1080p / 4K UHD** |
-| **Desktop Chrome / Firefox (Windows, macOS, Linux)** | Widevine `L3` (`SW_SECURE_CRYPTO`) | Varies by GPU driver | **720p / 480p SD** |
-| **Headless / Disabled Hardware Acceleration** | `L3` or Unsupported | `powerEfficient: false` (CPU fallback) | **720p or lower (high CPU)** |
+| **Android Chrome / Chromebook (Hardware TEE)** | Widevine `L1` (`HW_SECURE_ALL`) | H.264, VP9, AV1 (newer SoCs) | **1080p / 4K UHD** *(with keybox + HDCP 2.2)* |
+| **Windows Chrome (Media Foundation CDM)** | Widevine `L1` (supported GPUs/drivers) or `L3` fallback | H.264, HEVC, VP9, AV1 | **1080p / 4K UHD** *(L1 + HDCP 2.2)* or **720p HD** *(L3)* |
+| **Windows Edge (Supported GPU + HDCP 2.2)** | PlayReady `SL3000` (`.recommendation.3000`) + Widevine | H.264, HEVC, VP9, AV1 | **4K UHD + HDR** |
+| **macOS Safari** | Apple FairPlay (`com.apple.fps`, platform-managed) | H.264, HEVC, AV1 (M3+) | **4K UHD** *(Apple Silicon / T2+)*; **1080p** *(pre-T2 Intel)* |
+| **macOS / Linux Chrome & Firefox** | Widevine `L3` (`SW_SECURE_CRYPTO`) | Varies by GPU driver (`VA-API` / Metal) | **720p HD** desktop *(up to 1080p or 480p SD on L3 mobile)* |
+| **Insecure HTTP (`isSecureContext: false`)** | EME Unavailable | Clear `MediaCapabilities` only | **Encrypted playback disabled** *(HTTPS or `localhost` required)* |
 
-*Note: Commercial services also verify display HDCP 2.2 compliance and account plan entitlements on top of EME robustness.*
+*Notes:*
+- *`requestMediaKeySystemAccess` resolving for `HW_SECURE_ALL` indicates platform declaration; real-world 4K playback also requires valid device keybox provisioning and HDCP 2.2 output protection.*
+- *`powerEfficient` reflects W3C `MediaCapabilities`' power-efficiency heuristic (for example, Chromium's `VideoDecodeStats` can be optimistic on cold profiles, and Firefox varies by OS backend) rather than absolute fixed-function ASIC proof.*
 
 ## Quick Start
 
@@ -28,70 +33,33 @@ import {
   probeDrmKeySystems,
   probeVideoCodecs,
   probeAudioCodecs,
+  probeHdcpPolicy,
   runFullMediaProbe,
 } from 'browser-drm-codec-probe';
 
+// Fast default probe (does not instantiate MediaKeys / HDCP check)
 const report = await runFullMediaProbe();
 console.log(report.summary.headline);
-console.log(report.summary);
-```
 
-### Example Output (`runFullMediaProbe()`)
-
-```json
-{
-  "probedAt": "2026-11-24T22:25:00.000Z",
-  "environmentSupported": {
-    "eme": true,
-    "mediaCapabilities": true
-  },
-  "drm": [
-    {
-      "id": "widevine",
-      "keySystem": "com.widevine.alpha",
-      "name": "Google Widevine",
-      "supported": true,
-      "securityLevel": "L1",
-      "hardwareBacked": true,
-      "robustness": "HW_SECURE_ALL",
-      "encryptionSchemes": ["cenc", "cbcs"]
-    }
-  ],
-  "videoCodecs": [
-    {
-      "codecId": "av1",
-      "name": "AOMedia AV1",
-      "supported": true,
-      "smooth": true,
-      "powerEfficient": true,
-      "hardwareAccelerated": true,
-      "status": "hardware",
-      "maxSupportedResolution": "4K60",
-      "maxHardwareResolution": "4K60"
-    }
-  ],
-  "summary": {
-    "widevineTier": "L1",
-    "highestHardwareDrm": "Widevine L1",
-    "estimatedMaxStreamingResolution": "4K / UHD",
-    "hardwareAv1": true,
-    "hardwareHevc": true,
-    "hardwareVp9": true,
-    "hardwareH264": true,
-    "dolbyDigitalPlus": true,
-    "headline": "Hardware DRM (Widevine L1) detected — likely 4K / UHD; GPU decode: AV1, HEVC, VP9, H264."
-  }
-}
+// Opt-in HDCP 2.2 policy check (instantiates a CDM via createMediaKeys)
+const hdcpReport = await runFullMediaProbe(undefined, {
+  checkHdcp: true,
+  minHdcpVersion: '2.2',
+});
+console.log(hdcpReport.hdcp);
 ```
 
 ## API
 
-- `probeDrmKeySystems(nav?)` — Probes `com.widevine.alpha` (`HW_SECURE_ALL` L1 vs `SW_SECURE_CRYPTO` L3), `com.microsoft.playready` (`3000` vs `2000`), `com.apple.fps`, and `org.w3.clearkey`.
-- `probeVideoCodecs(nav?)` — Queries `navigator.mediaCapabilities.decodingInfo()` across `AV1`, `HEVC (H.265)`, `VP9`, and `H.264 (AVC)` at `1080p60` and `4K60`.
-- `probeAudioCodecs(nav?)` — Queries `Opus`, `AAC-LC`, `FLAC`, and `Dolby Digital Plus (EC-3)` decode support.
-- `runFullMediaProbe(nav?)` — Runs all three probes concurrently and builds a structured JSON report plus a human-readable `summary`.
+- `DRM_KEY_SYSTEMS`, `EME_VIDEO_CODECS`, `VIDEO_CODEC_PROFILES`, `AUDIO_CODEC_PROFILES` — Exported spec tables (`av01.0.09M.08` / `.12M.08` / `.13M.08`, `hvc1.1.6.L123.90` / `hvc1.2.4.L150.B0` / `.L153.B0`, `vp09.00.41.08` / `.50.08` / `.51.08`, `avc1.64002a` / `.640033` / `.640034`).
+- `probeDrmKeySystems(nav?)` — Probes Widevine 5-tier L1/L2/L3 ladder, modern PlayReady `.recommendation.3000` / `.clearlead` / `.recommendation` / legacy fallback, FairPlay (`sinf`, `skd`), and ClearKey across H.264, VP9, AV1, and HEVC, plus `getConfiguration()`-verified `encryptionSchemes`.
+- `probeVideoCodecs(nav?, { mediaType?: 'media-source' | 'file' })` — Queries `MediaCapabilities.decodingInfo()` (defaults to `'media-source'`) across `1080p60`, `4K30`, and `4K60`.
+- `probeAudioCodecs(nav?, { mediaType?: 'media-source' | 'file' })` — Queries `Opus`, `AAC-LC`, `FLAC` (automatically falling back to `'file'` if `'media-source'` rejects raw `audio/flac`), and `Dolby Digital Plus (EC-3)`.
+- `probeEncryptedStreaming(nav, drmResults, videoCodecs, { mediaType? })` — Queries coupled `MediaCapabilities.decodingInfo({ type: 'media-source', video, keySystemConfiguration })`.
+- `probeHdcpPolicy(nav?, { minHdcpVersion?: '2.2', drmResults? })` — Opt-in helper calling `createMediaKeys().getStatusForPolicy({ minHdcpVersion })`.
+- `runFullMediaProbe(nav?, { mediaType?, checkHdcp?, minHdcpVersion?, isSecureContext? })` — Runs probes concurrently and builds a structured JSON report including `environmentSupported.isSecureContext` and `summary`.
 
-All functions accept an optional `Navigator`-like object for dependency injection in tests and degrade safely in SSR or Node environments where browser media APIs are absent.
+All functions accept an optional `Navigator`-like object for dependency injection in tests and degrade safely in SSR or Node environments.
 
 ## Running Tests
 
