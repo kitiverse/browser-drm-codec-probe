@@ -1,0 +1,42 @@
+{
+  "name": "browser-drm-codec-probe",
+  "version": "1.0.0",
+  "description": "Zero-dependency browser probe for EME DRM tiers (Widevine L1/L3, PlayReady, FairPlay, ClearKey) and MediaCapabilities hardware video/audio codec decoding.",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "homepage": "https://kitiverse.com/hardware/video-drm-codec-tester/",
+  "repository": "https://github.com/kitiverse/browser-drm-codec-probe",
+  "author": "Kitiverse Digital Lab <support@kitiverse.com>",
+  "keywords": [
+    "eme",
+    "drm",
+    "widevine",
+    "playready",
+    "fairplay",
+    "media-capabilities",
+    "av1",
+    "hevc",
+    "vp9",
+    "hardware-acceleration",
+    "video-codecs"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
